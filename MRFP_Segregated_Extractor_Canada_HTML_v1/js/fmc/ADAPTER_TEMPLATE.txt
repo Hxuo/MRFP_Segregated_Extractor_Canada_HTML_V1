@@ -1,0 +1,16 @@
+/* Copy as js/fmc/<issuer>.js. Edit the issuer adapter ONLY. */
+registerFMC({
+ key:'example',name:'Example Segregated Insurer',
+ detect(index){return index.some(page=> /* signature, no filenames */ false);},
+ extract(index){
+   // Validate issuer + template, determine reporting date.
+   // Use segmentFunds(index, yourIssuerSpecificHeaderFn) for fund boundaries.
+   // Return one row for each fund/class, and metric cell provenance.
+   // Each row: {row_id:UTIL.key(fund,className,period),fund_name, class_name,
+   //  report_date:'YYYY-MM-DD',year:2026,MER:null,TER:null,PTR:null,
+   //  evidence:{MER:{page,box,sourceText,...},PTR:{...}} }.
+   // Use UTIL.box(item) only for an EXACT matching source item in the correct table.
+   // No guessing; missing=null. Error or diagnostic for unsupported layouts.
+   return {issuer:'Example Segregated Insurer',report_date:'YYYY-MM-DD',funds:[],results:[],warnings:[]};
+ }
+});

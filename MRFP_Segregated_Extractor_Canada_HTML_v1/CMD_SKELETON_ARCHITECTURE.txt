@@ -1,0 +1,56 @@
+cd /d D:\
+REM STEP 1: Change the first line if the company PC uses another destination drive/path.
+REM Run these commands inside Windows Command Prompt (CMD), not PowerShell.
+if not exist "MRFP_Segregated_Extractor_Canada_HTML_v1" mkdir "MRFP_Segregated_Extractor_Canada_HTML_v1"
+cd "MRFP_Segregated_Extractor_Canada_HTML_v1"
+
+REM STEP 2: Create the complete production project folder structure.
+if not exist "Assets" mkdir "Assets"
+if not exist "css" mkdir "css"
+if not exist "dev-tools" mkdir "dev-tools"
+if not exist "js" mkdir "js"
+if not exist "vendor" mkdir "vendor"
+if not exist "Assets\Icons" mkdir "Assets\Icons"
+if not exist "js\core" mkdir "js\core"
+if not exist "js\fmc" mkdir "js\fmc"
+if not exist "vendor\pdfjs" mkdir "vendor\pdfjs"
+
+REM STEP 3: Create the file-name placeholders. Existing files are NOT overwritten.
+REM Copy the source content into each corresponding file after creating the skeleton.
+if not exist "Assets\Icons\LSEG.jpg" type nul > "Assets\Icons\LSEG.jpg"
+if not exist "Assets\Icons\sales-report.png" type nul > "Assets\Icons\sales-report.png"
+if not exist "CMD_SKELETON_ARCHITECTURE.txt" type nul > "CMD_SKELETON_ARCHITECTURE.txt"
+if not exist "README.md" type nul > "README.md"
+if not exist "css\style.css" type nul > "css\style.css"
+if not exist "dev-tools\build.cjs" type nul > "dev-tools\build.cjs"
+if not exist "dev-tools\fmc-manifest.json" type nul > "dev-tools\fmc-manifest.json"
+if not exist "index.html" type nul > "index.html"
+if not exist "js\app.js" type nul > "js\app.js"
+if not exist "js\core\document-indexer.js" type nul > "js\core\document-indexer.js"
+if not exist "js\core\evidence-engine.js" type nul > "js\core\evidence-engine.js"
+if not exist "js\core\extraction-engine.js" type nul > "js\core\extraction-engine.js"
+if not exist "js\core\fmc-registry.js" type nul > "js\core\fmc-registry.js"
+if not exist "js\core\fund-segmenter.js" type nul > "js\core\fund-segmenter.js"
+if not exist "js\core\locator-compat.js" type nul > "js\core\locator-compat.js"
+if not exist "js\core\shared-utils.js" type nul > "js\core\shared-utils.js"
+if not exist "js\engine.js" type nul > "js\engine.js"
+if not exist "js\evidence-locator.js" type nul > "js\evidence-locator.js"
+if not exist "js\evidence-viewer.js" type nul > "js\evidence-viewer.js"
+if not exist "js\excel-export.js" type nul > "js\excel-export.js"
+if not exist "js\fmc\ADAPTER_TEMPLATE.txt" type nul > "js\fmc\ADAPTER_TEMPLATE.txt"
+if not exist "js\fmc\ci.js" type nul > "js\fmc\ci.js"
+if not exist "js\pdf-reader.js" type nul > "js\pdf-reader.js"
+if not exist "js\storage.js" type nul > "js\storage.js"
+if not exist "vendor\pdfjs\pdf.min.js" type nul > "vendor\pdfjs\pdf.min.js"
+if not exist "vendor\pdfjs\pdf.worker.min.js" type nul > "vendor\pdfjs\pdf.worker.min.js"
+
+REM STEP 4: IMPORTANT BINARY / BUNDLED ASSET NOTES
+REM Assets\Icons\*.jpg and *.png cannot be reconstructed by plain-text copy-paste.
+REM Copy those image files directly from the production ZIP (or another trusted source).
+REM vendor\pdfjs\pdf.min.js and pdf.worker.min.js must contain the complete JavaScript.
+REM Do NOT leave the PDF.js files as empty placeholders: PDF preview/extraction needs them.
+REM The source bundle files js\engine.js and js\evidence-locator.js are included in the ZIP.
+REM If editing js\fmc\*.js, run node dev-tools\build.cjs to regenerate those bundles.
+REM STEP 5: When file contents are copied, open index.html in a compatible web browser.
+
+echo Production project skeleton created at %CD%
