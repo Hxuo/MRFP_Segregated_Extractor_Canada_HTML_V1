@@ -95,7 +95,7 @@ function renderGroups(){
   const wrap=document.createElement('div');wrap.className='scroller';
   const table=document.createElement('table');table.innerHTML='<thead><tr><th>Class / Series</th><th>MER (%)</th><th>TER (%)</th><th>PTR (%)</th><th>Reporting date</th><th>Source</th><th>Actions</th></tr></thead>';
   const body=document.createElement('tbody');for(const r of f.rows){const tr=document.createElement('tr');
-   tr.innerHTML=`<td>${esc(r.class_name)}${r.originalValues?'<small class="seg-page"> · edited</small>':''}</td>${['MER','TER','PTR'].map(k=>`<td class="number ${r[k]===null?'seg-missing':''}" title="${esc(source(r,k))}">${fmt(r[k])}</td>`).join('')}<td>${esc(r.report_date)}</td><td><small class="seg-page">p. ${r.source_page||'—'}</small></td><td><span class="result-actions"><button class="ghost seg-btn locate" type="button" data-key="${esc(r.row_id)}" title="Find original PDF cells">⌕ Search</button><button class="ghost seg-btn edit" type="button" data-key="${esc(r.row_id)}">Edit</button></span></td>`;
+   tr.innerHTML=`<td>${esc(r.class_name)}${r.originalValues?'<small class="seg-page"> · edited</small>':''}</td>${['MER','TER','PTR'].map(k=>`<td class="number ${r[k]===null?'seg-missing':''}" title="${esc(source(r,k))}">${fmt(r[k])}</td>`).join('')}<td>${esc(r.report_date)}</td><td><small class="seg-page">p. ${r.source_page||'—'}</small></td><td><span class="result-actions"><button class="ghost seg-btn locate" type="button" data-key="${esc(r.row_id)}" title="Find original PDF cells">⌕</button><button class="ghost seg-btn edit" type="button" data-key="${esc(r.row_id)}">Edit</button></span></td>`;
    body.appendChild(tr);
   }table.appendChild(body);wrap.appendChild(table);section.append(summary,wrap);root.appendChild(section);
  }
