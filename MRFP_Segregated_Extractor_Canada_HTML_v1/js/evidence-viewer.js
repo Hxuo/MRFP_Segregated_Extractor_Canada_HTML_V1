@@ -3,7 +3,7 @@
 (function(global){
 'use strict';
 const $=id=>document.getElementById(id), locator=global.MRFP_EVIDENCE;
-const state={pdf:null,loading:null,blob:null,doc:null,token:0,scale:1.15,observer:null,visible:new Set(),cache:new Map(),renders:new Map(),current:1,overlay:[],focusKey:null,refreshPromise:null,refreshDoc:null,userNavigated:false,navPromise:null,fallbackUrl:null};
+const state={pdf:null,loading:null,blob:null,doc:null,token:0,scale:1.15,observer:null,visible:new Set(),cache:new Map(),renders:new Map(),current:1,overlay:[],focusKey:null,refreshPromise:null,refreshDoc:null,userNavigated:false,navPromise:null,pendingFund:null,fallbackUrl:null};
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
 // A PDF.js canvas must contain enough physical pixels for small MRFP table fonts.
 // Use supersampling on standard-DPI displays, respect HiDPI displays, and cap
@@ -21,7 +21,7 @@ function cleanupNative(){if(state.fallbackUrl){URL.revokeObjectURL(state.fallbac
 function reset(){
  ++state.token;state.observer?.disconnect();state.observer=null;
  for(const task of state.renders.values()){try{task.cancel();}catch{}}
- state.renders.clear();state.visible.clear();state.cache.clear();state.overlay=[];state.focusKey=null;state.refreshPromise=null;state.refreshDoc=null;state.userNavigated=false;
+ state.renders.clear();state.visible.clear();state.cache.clear();state.overlay=[];state.focusKey=null;state.refreshPromise=null;state.refreshDoc=null;state.userNavigated=false;state.pendingFund=null;
  const pdf=state.pdf,loading=state.loading;
  state.pdf=null;state.loading=null;state.blob=null;state.doc=null;state.current=1;
  if(loading&&!pdf)loading.destroy().catch(()=>{});
@@ -228,7 +228,7 @@ async function open(blob,doc){
  if(!blob){reset();$('pdfUnavailable').classList.remove('hidden');$('pdfUnavailable').textContent=doc?'History loaded — original PDF not available.':'No PDF selected — choose or open a saved document to preview.';return;}
  $('pdfUnavailable').classList.add('hidden');
  if(state.blob===blob&&state.pdf){
-  state.doc=doc||null;state.focusKey=null;state.userNavigated=false;
+  state.doc=doc||null;state.focusKey=null;state.userNavigated=false;state.pendingFund=null;
   repaint();
   const page=doc&&locator.initialPage(doc);
   if(page)await jump(page);
@@ -266,8 +266,11 @@ async function open(blob,doc){
   for(const el of container.children)state.observer.observe(el);
   repaint();
   const firstEvidence=doc&&locator.initialPage(doc);
-  updateCounters();await jump(firstEvidence||1);
-  notice(summary());
+  const requested=state.pendingFund?.docHash===doc?.hash?state.pendingFund:null;
+  updateCounters();await jump(requested?.page||firstEvidence||1);
+  if(token!==state.token)return;
+  if(state.pendingFund?.docHash===doc?.hash)await applyFundNavigation(state.pendingFund);
+  else notice(summary());
   if(doc)ensureEvidence();
  }catch(e){if(token!==state.token)return;console.warn('PDF.js evidence viewer unavailable',e);fallback(blob,'PDF.js rendering unavailable. Original browser PDF preview is shown; highlights are disabled.');}
 }
@@ -304,6 +307,55 @@ async function focusRow(row){
  }
  else notice(`${row.class_name}: Exact source location unavailable.${pageList.length?' Opened known source page '+pageList[0]+'.':''}${correction?' The current values include manual corrections.':''} Other available series remain highlighted.`);
 }
+// Choose a Financial Highlights source page from the current fund's own metadata.
+// Do not search for matching numeric values or borrow pages from other funds.
+function fundSourcePage(fund,doc){
+ if(!fund||!doc)return null;
+ const inRange=n=>Number.isInteger(n)&&n>=1&&
+  (!Number.isInteger(fund.startPage)||n>=fund.startPage)&&
+  (!Number.isInteger(fund.endPage)||n<=fund.endPage)&&
+  (!Number.isInteger(doc.pages)||n<=doc.pages);
+ const validated=(fund.tablePages||[]).filter(inRange).sort((a,b)=>a-b);
+ if(validated.length)return {page:validated[0],kind:'Financial Highlights'};
+ const rows=(doc.results||[]).filter(r=>r.fund_name===fund.name);
+ const actual=[];
+ for(const row of rows){
+  const rec=doc.evidenceMap?.rows?.[rowKey(row)];
+  if(rec&&!needsRefresh(row,rec)){
+   for(const m of ['MER','TER','PTR']){
+    const hit=rec.metrics?.[m];
+    if(hit?.box&&inRange(hit.page))actual.push(hit.page);
+   }
+  }
+ }
+ if(actual.length)return {page:Math.min(...actual),kind:'Financial Highlights evidence'};
+ const sourcePages=rows.map(r=>r.source_page).filter(inRange);
+ if(sourcePages.length)return {page:Math.min(...sourcePages),kind:'reported source page'};
+ return inRange(fund.startPage)?{page:fund.startPage,kind:'fund section start (ratio source unavailable)'}:null;
+}
+function fundNotice(choice){
+ return `${choice.fundName} · ${choice.kind} · PDF page ${choice.page}. Original available evidence remains highlighted in yellow; Search focuses individual classes in orange.`;
+}
+async function applyFundNavigation(choice){
+ if(!state.pdf||!choice||state.pendingFund!==choice||state.doc?.hash!==choice.docHash)return;
+ const token=state.token;
+ await jump(choice.page);
+ if(token===state.token&&state.pendingFund===choice&&state.doc?.hash===choice.docHash)notice(fundNotice(choice));
+}
+function focusFund(fund,doc){
+ if(!fund||!doc)return Promise.resolve();
+ if(!state.blob){notice('Original PDF unavailable — selected fund displayed in results, but PDF navigation requires a stored PDF.');return Promise.resolve();}
+ if(state.doc?.hash!==doc.hash)return Promise.resolve();
+ state.pendingFund=null; // invalidate any prior queued request before picking this fund
+ state.focusKey=null;repaint(); // Changing funds clears orange Search focus, never yellow source evidence.
+ const source=fundSourcePage(fund,doc);
+ if(!source){notice(`${fund.name}: No validated source page available for this fund.`);return Promise.resolve();}
+ if(state.fallbackUrl){notice(`${fund.name}: Native PDF preview is active; exact page navigation needs the PDF.js viewer.`);return Promise.resolve();}
+ const choice={fundName:fund.name,docHash:doc.hash,...source};
+ state.pendingFund=choice;state.userNavigated=true; // prevent delayed History evidence refresh from overriding this choice
+ if(!state.pdf){notice(`${fund.name}: Opening PDF to navigate to page ${choice.page}…`);return Promise.resolve();}
+ return applyFundNavigation(choice);
+}
 function bind(){
  $('evidenceScroll').addEventListener('wheel',()=>{state.userNavigated=true;},{passive:true});
  $('evidenceScroll').addEventListener('touchstart',()=>{state.userNavigated=true;},{passive:true});
@@ -314,5 +366,5 @@ function bind(){
  $('evidencePageInput').onchange=e=>{const n=parseInt(e.target.value,10);if(Number.isInteger(n)){state.userNavigated=true;jump(n);}e.target.value='';};
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',bind);else bind();
-global.MRFP_EVIDENCE_VIEWER={open,focusRow,updateDoc,reset,jump};
+global.MRFP_EVIDENCE_VIEWER={open,focusRow,focusFund,updateDoc,reset,jump};
 })(globalThis);
