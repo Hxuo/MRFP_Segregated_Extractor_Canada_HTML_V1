@@ -78,6 +78,24 @@ async function activate(doc){
  $('pdfUnavailable').classList.add('hidden');renderGroups();showPage('extract');
  await VIEW.open(doc.blob||null,doc);
 }
+// Shared, FMC-independent PDF navigation used by both fund names and the dropdown.
+// A fund-name click only opens its accordion and navigates; it does NOT filter the list.
+function navigateToFund(index,section){
+ if(!st.active||!Number.isInteger(index)||index<0||index>=st.active.funds.length)return;
+ if(section)section.open=true;
+ Promise.resolve(VIEW.focusFund(st.active.funds[index],st.active)).catch(e=>notify('Fund navigation failed: '+e.message));
+}
+// Only an explicit Fund selector change filters the grouped results.
+function selectFund(value){
+ if(!st.active)return;
+ const isAll=value==='all',index=isAll?-1:Number(value);
+ if(!isAll&&(!Number.isInteger(index)||index<0||index>=st.active.funds.length))return;
+ st.filter=isAll?'all':String(index);st.page=0;
+ $('fundSelect').value=st.filter;
+ if(!isAll){st.search='';$('fundSearch').value='';}
+ renderGroups();
+ if(!isAll)navigateToFund(index,$('result').querySelector('button[data-fund-index="'+index+'"]')?.closest('details'));
+}
 function groupRows(){
  if(!st.active)return [];
  const text=st.search.toLowerCase().trim();
@@ -91,7 +109,7 @@ function renderGroups(){
  const list=groupRows(),size=8,pages=Math.max(1,Math.ceil(list.length/size));st.page=Math.min(Math.max(0,st.page),pages-1);
  const chunk=list.slice(st.page*size,(st.page+1)*size);
  for(const f of chunk){const section=document.createElement('details');section.className='seg-group';section.open=st.filter!=='all'||list.length<5;
-  const summary=document.createElement('summary');summary.innerHTML=`<strong>${esc(f.name)}</strong><span class="seg-small">${f.rows.length} classes · PDF pp. ${f.startPage}–${f.endPage}</span>`;
+  const summary=document.createElement('summary');summary.innerHTML=`<button type="button" class="seg-fund-name" data-fund-index="${f.idx}" title="Select this fund and open its source in the PDF viewer">${esc(f.name)}</button><span class="seg-small">${f.rows.length} classes · PDF pp. ${f.startPage}–${f.endPage}</span>`;
   const wrap=document.createElement('div');wrap.className='scroller';
   const table=document.createElement('table');table.innerHTML='<thead><tr><th>Class / Series</th><th>MER (%)</th><th>TER (%)</th><th>PTR (%)</th><th>Reporting date</th><th>Source</th><th>Actions</th></tr></thead>';
   const body=document.createElement('tbody');for(const r of f.rows){const tr=document.createElement('tr');
@@ -173,10 +191,17 @@ function bind(){
  $('clearBatch').addEventListener('click',()=>pick([]));
  for(const e of ['dragenter','dragover'])$('uploadZone').addEventListener(e,ev=>{ev.preventDefault();ev.dataTransfer.dropEffect='copy';});
  $('uploadZone').addEventListener('drop',ev=>{ev.preventDefault();pick(ev.dataTransfer.files);});
- $('fundSelect').addEventListener('change',e=>{st.filter=e.target.value;st.page=0;renderGroups();});
+ $('fundSelect').addEventListener('change',e=>selectFund(e.target.value));
  $('fundSearch').addEventListener('input',e=>{st.search=e.target.value;st.page=0;renderGroups();});
  $('prevGroup').addEventListener('click',()=>{st.page--;renderGroups();});$('nextGroup').addEventListener('click',()=>{st.page++;renderGroups();});
- $('result').addEventListener('click',e=>{const b=e.target.closest('button[data-key]');if(!b)return;const row=rowOf(st.active,b.dataset.key);if(!row)return;
+ $('result').addEventListener('click',e=>{
+  const fundButton=e.target.closest('button[data-fund-index]');
+  if(fundButton){
+   // Don't trigger the native summary toggle or change the Fund selector filter.
+   e.preventDefault();e.stopPropagation();
+   navigateToFund(Number(fundButton.dataset.fundIndex),fundButton.closest('details.seg-group'));return;
+  }
+  const b=e.target.closest('button[data-key]');if(!b)return;const row=rowOf(st.active,b.dataset.key);if(!row)return;
   if(b.classList.contains('locate'))VIEW.focusRow(row);else if(b.classList.contains('edit'))editRow(b.dataset.key);});
  $('editClose').onclick=$('editCancel').onclick=()=>$('editDialog').close();
  $('editForm').addEventListener('submit',e=>{e.preventDefault();saveEdit().catch(err=>notify('Edit failed: '+err.message));});
