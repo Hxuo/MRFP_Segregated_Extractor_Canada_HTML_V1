@@ -490,6 +490,9 @@ html[data-theme="dark"] #historyPage .history-actions .restore-saved:not(:disabl
 .seg-group{border:1px solid var(--v4-border,#dbe5ed);border-radius:11px;margin-bottom:11px;background:var(--v4-card,#fff);overflow:hidden}
 .seg-group summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:11px 14px;background:var(--v4-soft,#edf4fa);font-size:13px;list-style:none}
 .seg-group summary::-webkit-details-marker{display:none}.seg-group summary:before{content:'▸';color:var(--v4-muted,#638);margin-right:-4px}.seg-group[open] summary:before{content:'▾'}
+.seg-group summary .seg-fund-name{appearance:none;background:transparent;border:0;box-shadow:none;padding:2px 0;color:var(--v4-text,#142a42);font:inherit;font-weight:750;line-height:1.4;text-align:left;min-width:0;cursor:pointer;overflow-wrap:anywhere}
+.seg-group summary .seg-fund-name:hover{text-decoration:underline;text-underline-offset:3px;color:var(--v4-link,#125c98)}
+.seg-group summary .seg-fund-name:focus-visible{outline:2px solid var(--v4-link,#125c98);outline-offset:3px;border-radius:3px}
 .seg-group summary .seg-small{font-weight:400;font-size:11px;color:var(--v4-muted,#577080);white-space:nowrap}
 .seg-group table{margin:0;min-width:470px}.seg-group th,.seg-group td{padding:8px 7px;font-size:12px}
 .seg-group .scroller{max-width:100%}.seg-missing{color:#8894a5;font-style:italic}.seg-page{font-size:10px;color:var(--v4-muted,#577)}
