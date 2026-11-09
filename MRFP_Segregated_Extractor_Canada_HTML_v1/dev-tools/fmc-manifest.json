@@ -1,3 +1,17 @@
 [
-  {"key":"ci","file":"js/fmc/ci.js","name":"CI Guaranteed Investment Funds"}
+  {
+    "key": "ci",
+    "file": "js/fmc/ci.js",
+    "name": "CI Guaranteed Investment Funds"
+  },
+  {
+    "key": "empire_life",
+    "file": "js/fmc/empire_life.js",
+    "name": "Empire Life Fund Facts"
+  },
+  {
+    "key": "canada_life",
+    "file": "js/fmc/canada_life.js",
+    "name": "Canada Life Segregated Funds Fund Facts"
+  }
 ]
