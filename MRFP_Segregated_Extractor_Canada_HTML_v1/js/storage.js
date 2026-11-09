@@ -2,6 +2,7 @@
 (function(global){
 'use strict';
 const DBNAME='mrfp_segregated_extractor_canada_browser_v1',DBVERSION=1;
+const TER_DEFINITION='total-expense-ratio-v1';
 let connection=null, unavailable=false;const volatileDocs=new Map(),volatileMeta=new Map();
 function req(r){return new Promise((res,rej)=>{r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error||Error('IndexedDB request failed'));});}
 async function db(){
@@ -32,14 +33,50 @@ async function transaction(store,mode,action){
   tx.onabort=()=>reject(tx.error||Error('Database transaction aborted'));
  });
 }
-async function get(hash){return await transaction('docs','readonly',s=>s.get(hash))||null;}
-async function put(doc){doc.updated=Date.now();await transaction('docs','readwrite',s=>s.put(doc));return doc;}
-async function importDoc(doc){await transaction('docs','readwrite',s=>s.put(doc));return doc;}
+// Old v1 backups and IndexedDB rows used an ambiguous TER definition.
+// Do not silently reinterpret those numbers as Total Expense Ratio. Keep an audit copy,
+// blank the live metric and stale evidence, and require renewed human verification.
+function normalizeLegacyTER(doc){
+ if(!doc || doc.terDefinition===TER_DEFINITION)return false;
+ let affected=0;
+ for(const row of doc.results||[]){
+  const oldHit=row.evidence?.TER||null;
+  if(row.TER!==null&&row.TER!==undefined || oldHit){
+   if(!Object.prototype.hasOwnProperty.call(row,'legacyTER'))
+    row.legacyTER={value:row.TER??null,evidence:oldHit,reason:'Previous TER definition ambiguous; original value retained for audit only'};
+   row.TER=null;
+   if(row.evidence)row.evidence.TER=null;
+   const mapped=doc.evidenceMap?.rows?.[row.row_id];
+   if(mapped){if(mapped.values)mapped.values.TER=null;if(mapped.metrics)delete mapped.metrics.TER;
+    if(Array.isArray(mapped.pages))mapped.pages=[...new Set(Object.values(mapped.metrics||{}).map(e=>e.page))];}
+   affected++;
+  }
+ }
+ doc.terDefinition=TER_DEFINITION;
+ if(affected){
+  doc.verified=false;
+  doc.warnings ||= [];
+  const notice=`TER definition updated: ${affected} legacy TER cell(s) cleared pending source review; original entries preserved in legacyTER audit data. Re-scan the original PDF if available.`;
+  if(!doc.warnings.includes(notice))doc.warnings.push(notice);
+ }
+ return true;
+}
+async function get(hash){const doc=await transaction('docs','readonly',s=>s.get(hash))||null;
+ if(doc&&normalizeLegacyTER(doc))await transaction('docs','readwrite',s=>s.put(doc)).catch(e=>console.warn('Legacy TER migration not persisted:',e.message));
+ return doc;
+}
+async function put(doc){normalizeLegacyTER(doc);doc.updated=Date.now();await transaction('docs','readwrite',s=>s.put(doc));return doc;}
+async function importDoc(doc){normalizeLegacyTER(doc);await transaction('docs','readwrite',s=>s.put(doc));return doc;}
 async function remove(hash){await transaction('docs','readwrite',s=>s.delete(hash));const ws=await workspace();if(ws.includes(hash))await saveWorkspace(ws.filter(h=>h!==hash));}
-async function all(){const docs=await transaction('docs','readonly',s=>s.getAll())||[];return docs.sort((a,b)=>b.updated-a.updated);}
+async function all(){const docs=await transaction('docs','readonly',s=>s.getAll())||[];
+ for(const doc of docs)if(normalizeLegacyTER(doc))
+  await transaction('docs','readwrite',s=>s.put(doc)).catch(e=>console.warn('Legacy TER migration not persisted:',e.message));
+ return docs.sort((a,b)=>b.updated-a.updated);
+}
 async function workspace(){const m=await transaction('meta','readonly',s=>s.get('workspace'));return m?.hashes||[];}
 async function saveWorkspace(hashes){await transaction('meta','readwrite',s=>s.put({key:'workspace',hashes}));}
 async function addToWorkspace(hash){const ws=await workspace();await saveWorkspace([hash,...ws.filter(x=>x!==hash)]);}
+async function removeFromWorkspace(hash){const ws=await workspace();if(!ws.includes(hash))return false;await saveWorkspace(ws.filter(x=>x!==hash));return true;}
 async function clearWorkspace(){await saveWorkspace([]);}
 async function listed(){const hashes=await workspace(),docs=await all(),map=new Map(docs.map(x=>[x.hash,x]));return hashes.map(x=>map.get(x)).filter(Boolean);}
 async function fingerprint(file){
@@ -88,5 +125,5 @@ async function resetAllSavedData(){
  });
 }
 function slim(doc){const {blob,...rest}=doc;return rest;}
-global.MRFP_STORAGE={db,get,put,importDoc,remove,all,workspace,addToWorkspace,clearWorkspace,listed,fingerprint,slim,clearStoredPDFs,resetAllSavedData,isTemporary:()=>unavailable};
+global.MRFP_STORAGE={db,get,put,importDoc,remove,all,workspace,addToWorkspace,removeFromWorkspace,clearWorkspace,listed,fingerprint,slim,normalizeLegacyTER,TER_DEFINITION,clearStoredPDFs,resetAllSavedData,isTemporary:()=>unavailable};
 })(globalThis);
