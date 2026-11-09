@@ -55,7 +55,8 @@ function sourceEvidence(rows){
   for(const name of UTIL.metricKeys){
    const hit=row.evidence?.[name];
    if(hit?.page&&hit?.box)metrics[name]={page:hit.page,box:hit.box,sourceText:hit.sourceText??hit.source??null,
-     isMissing:hit.isMissing===true,metric:name,value:row[name],kind:hit.kind||'validated-cell'};
+     isMissing:hit.isMissing===true,metric:name,value:row[name],kind:hit.kind||'validated-cell',scope:hit.scope||'class-level',estimated:hit.estimated===true,
+     ...(name==='TER'?{headingText:hit.headingText||null}:{} )};
   }
   map.rows[row.row_id]={fund:row.fund_name,className:row.class_name,reportDate:row.report_date,
    values:Object.fromEntries(UTIL.metricKeys.map(m=>[m,row[m]])),pages:[...new Set(Object.values(metrics).map(e=>e.page))],metrics};
@@ -64,11 +65,44 @@ function sourceEvidence(rows){
 }
 
 /* js/core/extraction-engine.js */
+/* Cross-issuer financial semantics. "TER" always means TOTAL Expense Ratio,
+   never Trading Expense Ratio. Issuer adapters establish actual table columns. */
+function validTotalExpenseEvidence(hit,index,value){
+ if(!hit || !Number.isInteger(hit.page) || hit.page<1 || !hit.box ||
+  ![hit.box.x,hit.box.y,hit.box.w,hit.box.h].every(Number.isFinite) ||
+  hit.box.w<=0 || hit.box.h<=0)return false;
+ if(/trading[\s-]*expense/i.test(String(hit.kind||'')))return false;
+ const heading=UTIL.clean(hit.headingText);
+ // A bare "TER" abbreviation is ambiguous; only an explicit expanded heading qualifies.
+ if(!/^total expense ratio(?:\s*(?:\([^)]*\)|%|:))*$/i.test(heading))return false;
+ const page=index.find(p=>p.page===hit.page);
+ if(!page || !UTIL.clean((page.lines||[]).join(' ')+' '+(page.text||'')).toLowerCase()
+   .includes('total expense ratio'))return false;
+ const printed=UTIL.readMetric(hit.sourceText??hit.source);
+ if(value===null)return printed===null && hit.isMissing===true &&
+   /^(?:[-–—−]|n\/a|na|nil|not available)$/i.test(String(hit.sourceText??hit.source??'').trim());
+ return printed===value && hit.isMissing!==true;
+}
+function enforceTotalExpenseRatio(out,index){
+ out.warnings ||= [];
+ for(const row of out.results){
+  const hit=row.evidence?.TER;
+  if((row.TER===null || row.TER===undefined) && !hit){row.TER=null;continue;}
+  if(!validTotalExpenseEvidence(hit,index,row.TER)){
+   const value=row.TER;
+   row.TER=null;
+   if(row.evidence)row.evidence.TER=null;
+   if(value!==null || hit)out.warnings.push(`${row.fund_name} / ${row.class_name}: TER omitted — no validated Total Expense Ratio source cell/heading (Trading Expense Ratio is not TER).`);
+  }
+ }
+}
 function extractSegregated(pages){
  const index=indexDocument(pages),matched=REGISTRY.filter(a=>a.detect(index));
  if(matched.length!==1)throw Error(matched.length?'Ambiguous issuer: '+matched.map(a=>a.key).join(', '):'Unsupported issuer/layout. No values guessed.');
  const adapter=matched[0];const out=adapter.extract(index);
  if(!out?.results?.length)throw Error('No validated fund classes extracted.');
+ // Validate meaning + source provenance before generating the evidence index.
+ enforceTotalExpenseRatio(out,index);
  for(const row of out.results){row.fmc_key=adapter.key;row.issuer=out.issuer||adapter.name;
   for(const k of UTIL.metricKeys)if(!Number.isFinite(row[k]))row[k]=null;}
  return {...out,fmc_key:adapter.key,evidenceMap:sourceEvidence(out.results)};
@@ -76,7 +110,9 @@ function extractSegregated(pages){
 
 /* js/fmc/ci.js */
 /* CI Guaranteed Investment Funds: document-specific header and column geometry.
-   No named list of CI funds. Every fund is discovered from report headings. */
+   No named list of CI funds. Every fund is discovered from report headings.
+   These supplied reports have no separately disclosed TOTAL Expense Ratio; TER=null.
+   Neither Trading Expense Ratio nor any other expense measure is a substitute. */
 registerFMC({
  key:'ci',name:'CI Investments Inc. — Guaranteed Investment Funds',
  detect(index){
@@ -149,6 +185,451 @@ registerFMC({
    }
   }
   return {issuer:'CI Investments Inc.',report_date,year:Number(periodYear),funds,results:result,warnings};
+ }
+});
+
+/* js/fmc/empire_life.js */
+/* Empire Life Fund Facts adapter.
+   Reads each Fund Facts cover/Quick Facts section for fund identity, as-of date,
+   and fund-level portfolio turnover; reads the Ongoing Fund Expenses table for
+   class-level MER. In the supplied template, TER is Trading Expense Ratio and FER
+   is Fund Expense Ratio, so both are excluded. A future explicit, expanded Total
+   Expense Ratio column is eligible; an abbreviation-only TER column is not.
+   Coordinates are derived from the actual page's table headings and source cells. */
+registerFMC({
+ key:'empire_life',
+ name:'The Empire Life Insurance Company — Guaranteed Investment Funds',
+ detect(index){
+  return index.some(page=>{
+   const text=UTIL.clean(page.text);
+   return /Fund Facts/i.test(text)&&
+    /The Empire Life Insurance Company/i.test(text)&&
+    /Empire Life Guaranteed Investment Funds/i.test(text)&&
+    page.items?.some(item=>/^Empire Life .+ GIF\*?$/i.test(UTIL.clean(item.str))&&item.x>200&&item.y>700&&item.y<745);
+  });
+ },
+ extract(index){
+  const warnings=[],funds=[],results=[];
+  const monthMap={january:'01',february:'02',march:'03',april:'04',may:'05',june:'06',july:'07',august:'08',september:'09',october:'10',november:'11',december:'12'};
+  const clean=UTIL.clean;
+  const itemCenter=item=>item.x+(item.w||0)/2;
+  const itemText=item=>clean(item?.str);
+  const isMissingText=text=>/^(?:[-–—−]|n\/a|na|nil|not available)$/i.test(clean(text));
+  const metricText=text=>{
+   const raw=clean(text).replace(/(?:\*|†|‡)+$/,'');
+   return UTIL.isNumber(raw)||isMissingText(raw)?raw:null;
+  };
+  const parseDate=page=>{
+   const item=(page.items||[]).find(i=>/^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+20\d{2}$/i.test(itemText(i))&&i.x>350&&i.y>690&&i.y<725);
+   const raw=itemText(item);
+   const match=raw.match(/^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(20\d{2})$/i);
+   if(!match)return null;
+   const month=monthMap[match[1].toLowerCase()],day=String(Number(match[2])).padStart(2,'0');
+   return {date:`${match[3]}-${month}-${day}`,item};
+  };
+  const isCover=page=>{
+   const text=clean(page.text);
+   return /\bFund Facts\b/i.test(text)&&
+    /The Empire Life Insurance Company/i.test(text)&&
+    /Empire Life Guaranteed Investment Funds/i.test(text)&&!!parseDate(page);
+  };
+  const coverPages=index.filter(isCover);
+  if(!coverPages.length)throw Error('Empire Life: no supported Fund Facts cover page found.');
+  const titleFromCover=page=>{
+   const candidates=(page.items||[]).filter(i=>/^Empire Life .+ GIF\*?$/i.test(itemText(i))&&i.x>200&&i.y>700&&i.y<745)
+    .sort((a,b)=>b.y-a.y||a.x-b.x);
+   return candidates.length?itemText(candidates[0]).replace(/\*+$/,'').trim():null;
+  };
+  const findPTR=page=>{
+   const labels=(page.items||[]).filter(i=>/^Fund Portfolio Turnover Rate$/i.test(itemText(i)));
+   if(labels.length!==1)return {value:null,evidence:null,warning:labels.length?'ambiguous Portfolio Turnover labels':'Portfolio Turnover Rate label not found'};
+   const label=labels[0];
+   const candidates=(page.items||[]).filter(i=>Math.abs(i.y-label.y)<2.5&&i.x>=label.x+label.w-1)
+    .sort((a,b)=>a.x-b.x).filter(i=>metricText(i.str)!==null);
+   if(candidates.length!==1)return {value:null,evidence:null,warning:candidates.length?'ambiguous Portfolio Turnover value':'Portfolio Turnover value not found'};
+   const cell=candidates[0],parsed=UTIL.readMetric(metricText(cell.str));
+   return {value:parsed,evidence:{page:page.page,box:UTIL.box(cell),sourceText:itemText(cell),source:itemText(cell),
+    isMissing:parsed===null,kind:'empire-life-fund-facts-portfolio-turnover',scope:'fund-level'}};
+  };
+  const findExpenseTable=pages=>{
+   for(const page of pages){
+    const text=clean(page.text);
+    if(!/2\.\s*Ongoing Fund Expenses/i.test(text)||
+       !/management expense ratio\s*\(MER\)/i.test(text))continue;
+    const items=page.items||[];
+    const classHeaders=items.filter(i=>/^Fund Class$/i.test(itemText(i)));
+    const merHeaders=items.filter(i=>/^MER\s*\(%\)$/i.test(itemText(i)));
+    const tradingHeaders=items.filter(i=>/^TER\s*\(%\)$/i.test(itemText(i)));
+    const ferHeaders=items.filter(i=>/^FER\s*\(%\)$/i.test(itemText(i)));
+    // Only a fully expanded Total Expense Ratio table heading can populate
+    // system TER. The bare TER (%) heading in the supplied Empire documents
+    // is explicitly Trading Expense Ratio and is deliberately not accepted.
+    const totalTerHeaders=items.filter(i=>/^Total Expense Ratio\s*(?:\(%\))?$/i.test(itemText(i)));
+    const header=classHeaders.find(c=>{
+     const near=list=>list.find(i=>Math.abs(i.y-c.y)<2.2);
+     return !!near(merHeaders);
+    });
+    if(!header)continue;
+    const sameY=list=>list.find(i=>Math.abs(i.y-header.y)<2.2);
+    const merHeader=sameY(merHeaders),tradingHeader=sameY(tradingHeaders),ferHeader=sameY(ferHeaders),totalTerHeader=sameY(totalTerHeaders);
+    const classCenter=itemCenter(header),merCenter=itemCenter(merHeader);
+    const numericHeaders=[merHeader,tradingHeader,ferHeader,totalTerHeader].filter(Boolean).sort((a,b)=>itemCenter(a)-itemCenter(b));
+    if(!(classCenter<merCenter)||numericHeaders.length<1)continue;
+    const boundsFor=target=>{
+     const idx=numericHeaders.indexOf(target);if(idx<0)return null;
+     const center=itemCenter(target),previous=idx>0?itemCenter(numericHeaders[idx-1]):classCenter;
+     const next=idx<numericHeaders.length-1?itemCenter(numericHeaders[idx+1]):null;
+     return [(previous+center)/2,next===null?center+(center-previous)/2:(center+next)/2];
+    };
+    const merBounds=boundsFor(merHeader),totalTerBounds=totalTerHeader?boundsFor(totalTerHeader):null;
+    if(!merBounds)continue;
+    const trailer=(items.filter(i=>/^3\.\s*Trailer Commissions$/i.test(itemText(i))).sort((a,b)=>b.y-a.y)[0]);
+    const bottomY=trailer?.y??(header.y-220);
+    const labels=items.filter(i=>{
+     const text=itemText(i),center=itemCenter(i);
+     return center>=classCenter-25&&center<=classCenter+25&&
+      i.y<header.y-3&&i.y>bottomY+2&&
+      /^(?:[A-Z][A-Z0-9-]{0,7}|(?:Class|Series)\s+[A-Z0-9][A-Z0-9-]*)$/i.test(text);
+    }).sort((a,b)=>b.y-a.y||a.x-b.x);
+    const rows=[],seen=new Set();
+    for(const label of labels){
+     const rawClass=itemText(label),className=/^(?:Class|Series)\s+/i.test(rawClass)?rawClass:`Class ${rawClass}`;
+     const identity=className.toLowerCase();if(seen.has(identity))continue;seen.add(identity);
+     const sameLine=items.filter(i=>Math.abs(i.y-label.y)<2.2);
+     const inColumn=(bounds)=>sameLine.filter(i=>{
+      const center=itemCenter(i);return center>bounds[0]&&center<bounds[1]&&metricText(i.str)!==null;
+     });
+     const cells=inColumn(merBounds),totalCells=totalTerBounds?inColumn(totalTerBounds):[];
+     rows.push({className,label,cell:cells.length===1?cells[0]:null,
+      terCell:totalTerBounds&&totalCells.length===1?totalCells[0]:null,
+      warning:cells.length!==1?(cells.length?'ambiguous MER cell':'MER cell not found'):null,
+      terWarning:totalTerBounds&&totalCells.length!==1?(totalCells.length?'ambiguous Total Expense Ratio cell':'Total Expense Ratio cell not found'):null});
+    }
+    return {page,rows,totalTerHeader};
+   }
+   return null;
+  };
+  for(let i=0;i<coverPages.length;i++){
+   const cover=coverPages[i],next=coverPages[i+1];
+   const endPage=next?next.page-1:index[index.length-1].page;
+   const name=titleFromCover(cover),dateInfo=parseDate(cover);
+   if(!name||!dateInfo){warnings.push(`PDF page ${cover.page}: Empire Life fund name or Fund Facts date could not be validated.`);continue;}
+   const sectionPages=index.filter(p=>p.page>=cover.page&&p.page<=endPage);
+   const expense=findExpenseTable(sectionPages);
+   const fund={name,startPage:cover.page,endPage,tablePages:expense?[expense.page.page]:[],documentType:'Fund Facts',report_date:dateInfo.date};
+   funds.push(fund);
+   if(!expense){warnings.push(`${name}: Ongoing Fund Expenses table not found or its MER column headings were not validated.`);continue;}
+   const ptr=findPTR(cover);
+   if(ptr.warning)warnings.push(`${name}: ${ptr.warning}. PTR left blank.`);
+   const estimated=/\bMER\s*,\s*TER\s*(?:and|&)\s*FER\s+are\s+estimates\b/i.test(expense.page.text)||
+    /\bMER\b.{0,100}\b(?:is|are)\s+estimated\b/i.test(expense.page.text);
+   if(!expense.rows.length){warnings.push(`${name}: no class rows were validated in the MER table.`);continue;}
+   for(const entry of expense.rows){
+    let MER=null,merEvidence=null;
+    if(entry.cell){
+     const source=metricText(entry.cell.str);MER=UTIL.readMetric(source);
+     merEvidence={page:expense.page.page,box:UTIL.box(entry.cell),sourceText:itemText(entry.cell),source:itemText(entry.cell),
+      isMissing:MER===null,kind:'empire-life-fund-facts-management-expense-ratio',
+      headingText:'Management Expense Ratio (MER)',...(estimated?{estimated:true}:{})};
+    }else warnings.push(`${name} / ${entry.className}: ${entry.warning}; MER left blank.`);
+    let TER=null,terEvidence=null;
+    if(expense.totalTerHeader){
+     if(entry.terCell){
+      const totalSource=metricText(entry.terCell.str);TER=UTIL.readMetric(totalSource);
+      terEvidence={page:expense.page.page,box:UTIL.box(entry.terCell),sourceText:itemText(entry.terCell),source:itemText(entry.terCell),
+       isMissing:TER===null,kind:'empire-life-fund-facts-total-expense-ratio',headingText:itemText(expense.totalTerHeader)};
+     }else if(entry.terWarning)warnings.push(`${name} / ${entry.className}: ${entry.terWarning}; Total TER left blank.`);
+    }
+    const row={row_id:UTIL.key(name,entry.className,dateInfo.date),fund_name:name,class_name:entry.className,
+     report_date:dateInfo.date,year:Number(dateInfo.date.slice(0,4)),MER,TER,PTR:ptr.value,
+     confidence:'validated-fund-facts-table-and-column',verified:false,document_type:'Fund Facts',
+     metricStatus:estimated?{MER:'estimated'}:{},
+     evidence:{MER:merEvidence,TER:terEvidence,PTR:ptr.evidence},source_page:expense.page.page,
+     ptr_scope:'fund-level'};
+    results.push(row);
+   }
+  }
+  if(!funds.length)throw Error('Empire Life: Fund Facts documents were detected, but no fund names/dates could be validated.');
+  if(!results.length)throw Error('Empire Life: no class/MER rows could be extracted from validated Ongoing Fund Expenses tables.');
+  const dates=funds.map(f=>f.report_date).sort();
+  const report_date=dates[dates.length-1];
+  return {issuer:'The Empire Life Insurance Company',document_type:'Fund Facts',report_date,
+   year:Number(report_date.slice(0,4)),funds,results,warnings};
+ }
+});
+
+/* js/fmc/canada_life.js */
+/* Canada Life Segregated Funds Fund Facts adapter.
+   The class matrix is formed from vertical series rows × horizontal guarantee-policy
+   columns. Page 1 is the primary source for MER, UOS, estimate status and PTR. The
+   page-2 Ongoing Expenses MER table is used only as a secondary cross-check. The
+   printed TER is Trading Expense Ratio and FER is Fund Expense Ratio; neither may
+   populate the system's Total TER. */
+registerFMC({
+ key:'canada_life',
+ name:'The Canada Life Assurance Company — Segregated Funds Fund Facts',
+ detect(index){
+  return index.some(page=>{
+   const text=UTIL.clean(page.text);
+   return /The Canada Life Assurance Company/i.test(text)&&
+    /FUND FACTS/i.test(text)&&
+    /Canada Life Segregated Funds Policy/i.test(text)&&
+    /Quick facts/i.test(text)&&
+    /Portfolio turnover rate/i.test(text);
+  });
+ },
+ extract(index){
+  const warnings=[],funds=[],results=[];
+  const clean=UTIL.clean;
+  const textOf=item=>clean(item?.str);
+  const cx=item=>item.x+(item.w||0)/2;
+  const numericOrDash=value=>{
+   const raw=clean(value).replace(/[†‡*]+$/,'');
+   return UTIL.isNumber(raw)||/^(?:[-–—−]|n\/a|na|nil|not available)$/i.test(raw)?raw:null;
+  };
+  const monthMap={january:'01',february:'02',march:'03',april:'04',may:'05',june:'06',july:'07',august:'08',september:'09',october:'10',november:'11',december:'12'};
+  const parseDate=page=>{
+   const match=clean(page.text).match(/All information as at\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(20\d{2})/i);
+   if(!match)return null;
+   return `${match[3]}-${monthMap[match[1].toLowerCase()]}-${String(Number(match[2])).padStart(2,'0')}`;
+  };
+  const isCover=page=>{
+   const text=clean(page.text);
+   return /The Canada Life Assurance Company/i.test(text)&&
+    /FUND FACTS/i.test(text)&&/Canada Life Segregated Funds Policy/i.test(text)&&
+    /Quick facts/i.test(text)&&/Portfolio turnover rate/i.test(text)&&!!parseDate(page);
+  };
+  const fundTitle=page=>{
+   const candidates=(page.items||[]).filter(item=>item.x<200&&item.y>710&&item.y<745&&
+    textOf(item)&&!/(?:FUND FACTS|Canada Life|Assurance Company|All information)/i.test(textOf(item)))
+    .sort((a,b)=>b.y-a.y||a.x-b.x);
+   return candidates.length===1?textOf(candidates[0]):null;
+  };
+  const parseSeriesName=raw=>{
+   const text=clean(raw).replace(/[¹²³]/g,'').replace(/\s+/g,' ');
+   let head=text.split(':')[0].trim();
+   if(!/\bseries\b/i.test(head)){
+    const match=text.match(/^(.+?\bseries(?:\s+\d+)?)(?:\s|$)/i);
+    if(!match)return null;
+    head=match[1].trim();
+   }
+   if(!head||head.length>70)return null;
+   return head.split(/\s+/).map(word=>word.charAt(0).toUpperCase()+word.slice(1).toLowerCase()).join(' ');
+  };
+  const isEstimateNote=page=>/if there are zero units outstanding,\s*the MER shown is an estimate/i.test(clean(page.text));
+  const findNoteItem=page=>(page.items||[]).find(item=>/if there are zero units outstanding/i.test(textOf(item))&&/MER shown is an estimate/i.test(textOf(item)))||null;
+  const parsePTR=page=>{
+   const labels=(page.items||[]).filter(item=>/^Portfolio turnover rate:?$/i.test(textOf(item)));
+   if(labels.length!==1)return {value:null,evidence:null,warning:labels.length?'ambiguous Portfolio Turnover Rate label':'Portfolio Turnover Rate label not found'};
+   const label=labels[0];
+   const cells=(page.items||[]).filter(item=>Math.abs(item.y-label.y)<2.5&&item.x>=label.x+label.w-2&&numericOrDash(item.str)!==null);
+   if(cells.length!==1)return {value:null,evidence:null,warning:cells.length?'ambiguous Portfolio Turnover Rate value':'Portfolio Turnover Rate value not found'};
+   const cell=cells[0],value=UTIL.readMetric(numericOrDash(cell.str));
+   return {value,evidence:{page:page.page,box:UTIL.box(cell),sourceText:textOf(cell),source:textOf(cell),isMissing:value===null,
+    kind:'canada-life-fund-facts-portfolio-turnover-rate',scope:'fund-level'}};
+  };
+  const lineGroups=(items,maxX,minY,maxY)=>{
+   const lines=[];
+   for(const item of (items||[]).filter(i=>i.x<maxX&&i.y<=maxY&&i.y>=minY&&textOf(i)).sort((a,b)=>b.y-a.y||a.x-b.x)){
+    let line=lines.find(g=>Math.abs(g.y-item.y)<2.2);
+    if(!line){line={y:item.y,items:[]};lines.push(line);}
+    line.items.push(item);
+   }
+   for(const line of lines){line.items.sort((a,b)=>a.x-b.x);line.text=line.items.map(textOf).join(' ').replace(/\s+/g,' ').trim();}
+   return lines.sort((a,b)=>b.y-a.y);
+  };
+  const findSeriesBlocks=(page,policyY)=>{
+   const lines=lineGroups(page.items,118,policyY-145,policyY-7);
+   const blocks=[];
+   for(const line of lines){
+    let block=blocks[blocks.length-1];
+    if(!block||block.topY-line.y>10.5){block={topY:line.y,bottomY:line.y,lines:[]};blocks.push(block);}
+    block.bottomY=Math.min(block.bottomY,line.y);block.lines.push(line);
+   }
+   return blocks.map(block=>{
+    const raw=block.lines.map(line=>line.text).join(' ').replace(/\s+/g,' ').trim();
+    return {...block,raw,seriesName:parseSeriesName(raw)};
+   }).filter(block=>block.seriesName);
+  };
+  // Primary MER source: the Quick Facts matrix on page 1. Each guarantee-policy
+  // heading spans a horizontal MER/NAV/UOS group; MER is aligned by its own header,
+  // not by the centre of the wider guarantee group.
+  const findCoverMERTable=page=>{
+   const text=clean(page.text),items=page.items||[];
+   if(!/guarantee policy/i.test(text)||!/quick facts/i.test(text)||!/portfolio turnover rate/i.test(text))return null;
+   const merHeaders=items.filter(i=>/^MER\s*\(%\)$/i.test(textOf(i))).sort((a,b)=>cx(a)-cx(b));
+   const uosHeaders=items.filter(i=>/^UOS$/i.test(textOf(i))&&merHeaders.length&&Math.abs(i.y-merHeaders[0].y)<2.5).sort((a,b)=>cx(a)-cx(b));
+   if(!merHeaders.length||uosHeaders.length!==merHeaders.length)return null;
+   const headerY=merHeaders.reduce((n,i)=>n+i.y,0)/merHeaders.length;
+   if(merHeaders.some(i=>Math.abs(i.y-headerY)>2.5))return null;
+   const policyItems=items.filter(i=>/^\d{2,3}\s*\/\s*\d{2,3}$/.test(textOf(i))&&i.y>headerY+4&&i.y<headerY+28)
+    .sort((a,b)=>cx(a)-cx(b));
+   if(policyItems.length!==merHeaders.length)return null;
+   const policyLevels=policyItems.map(item=>({level:textOf(item).replace(/\s+/g,''),item,center:cx(item)}));
+   if(new Set(policyLevels.map(p=>p.level)).size!==policyLevels.length)return null;
+   const policyY=policyLevels.reduce((n,p)=>n+p.item.y,0)/policyLevels.length;
+   const lines=lineGroups(items,210,policyY-115,headerY-5);
+   const parsedRows=[],seen=new Set();
+   for(const line of lines){
+    const seriesName=parseSeriesName(line.text);
+    if(!seriesName)continue;
+    if(seen.has(seriesName)){parsedRows.push({seriesName,warning:'duplicate series label'});continue;}
+    seen.add(seriesName);
+    const cells=merHeaders.map(header=>{
+     const matches=items.filter(item=>Math.abs(item.y-line.y)<2.5&&numericOrDash(item.str)!==null&&Math.abs(cx(item)-cx(header))<20);
+     return matches.length===1?matches[0]:null;
+    });
+    if(cells.some(cell=>!cell))parsedRows.push({seriesName,warning:'MER cells could not be aligned to every guarantee-policy heading'});
+    else parsedRows.push({seriesName,cells,line});
+   }
+   if(!parsedRows.length)return null;
+   return {page,policyLevels,policyY,rows:parsedRows,merHeaders,uosHeaders,headerY,kind:'quick-facts-primary'};
+  };
+  // Secondary-only source: the Ongoing Expenses matrix on page 2. It may confirm
+  // page-1 MER values, but it never supplies the production value or evidence cell.
+  const findOngoingExpensesMERTable=pages=>{
+   for(const page of pages){
+    const text=clean(page.text),items=page.items||[];
+    if(!/2\.\s*Ongoing expenses/i.test(text)||
+       !/management expense ratio\s*\(MER\)/i.test(text)||
+       !/trading expense ratio\s*\(TER\)/i.test(text)||
+       !/fund expense ratio\s*\(FER\)/i.test(text))continue;
+    const merHeaders=items.filter(i=>/^MER\s*\(%\)$/i.test(textOf(i)));
+    const tradingHeaders=items.filter(i=>/^TER\s*\(%\)$/i.test(textOf(i)));
+    const ferHeaders=items.filter(i=>/^FER\s*\(%\)$/i.test(textOf(i)));
+    if(merHeaders.length!==1||tradingHeaders.length!==1||ferHeaders.length!==1)continue;
+    const merHeader=merHeaders[0],tradingHeader=tradingHeaders[0],ferHeader=ferHeaders[0];
+    const policyItems=items.filter(i=>/^\d{2,3}\s*\/\s*\d{2,3}$/.test(textOf(i))&&
+      i.y<merHeader.y&&i.y>merHeader.y-38&&Math.abs(i.y-merHeader.y)>8&&cx(i)<cx(tradingHeader)-20)
+      .sort((a,b)=>cx(a)-cx(b));
+    const policyLevels=[];
+    for(const item of policyItems){
+     const level=textOf(item).replace(/\s+/g,'');
+     if(!policyLevels.some(p=>p.level===level))policyLevels.push({level,item,center:cx(item)});
+    }
+    if(!policyLevels.length||policyLevels.length!==policyItems.length)continue;
+    const policyY=policyLevels.reduce((sum,p)=>sum+p.item.y,0)/policyLevels.length;
+    const blocks=findSeriesBlocks(page,policyY);
+    if(!blocks.length)continue;
+    const parsedRows=[],seen=new Set();
+    for(const block of blocks){
+     if(seen.has(block.seriesName)){parsedRows.push({seriesName:block.seriesName,warning:'duplicate series label'});continue;}
+     seen.add(block.seriesName);
+     const candidateYs=[];
+     for(const item of items){
+      if(numericOrDash(item.str)===null||item.x<Math.min(...policyLevels.map(p=>p.center))-25||item.x>Math.max(...policyLevels.map(p=>p.center))+25)continue;
+      if(item.y>=block.bottomY-2.2&&item.y<=block.topY+2.2&&!candidateYs.some(y=>Math.abs(y-item.y)<2.0))candidateYs.push(item.y);
+     }
+     const complete=[];
+     for(const y of candidateYs){
+      const cells=policyLevels.map(policy=>{
+       const matches=items.filter(item=>Math.abs(item.y-y)<2.0&&numericOrDash(item.str)!==null&&Math.abs(cx(item)-policy.center)<25);
+       return matches.length===1?matches[0]:null;
+      });
+      if(cells.every(Boolean))complete.push({y,cells});
+     }
+     if(complete.length!==1){parsedRows.push({seriesName:block.seriesName,warning:complete.length?'ambiguous secondary MER row':'secondary MER cells could not be aligned'});continue;}
+     parsedRows.push({seriesName:block.seriesName,cells:complete[0].cells,block});
+    }
+    return {page,policyLevels,policyY,rows:parsedRows,merHeader,tradingHeader,ferHeader};
+   }
+   return null;
+  };
+  const crossCheckPage2=(primary,secondary,fundName)=>{
+   if(!secondary)return {status:'unavailable',page:null,matched:0,mismatches:0};
+   const secondaryRows=new Map(secondary.rows.filter(r=>r.cells).map(r=>[r.seriesName,r]));
+   const secondaryLevels=new Map(secondary.policyLevels.map((p,i)=>[p.level,i]));
+   let matched=0,mismatches=0;
+   for(const row of primary.rows.filter(r=>r.cells)){
+    const other=secondaryRows.get(row.seriesName);if(!other)continue;
+    for(let col=0;col<primary.policyLevels.length;col++){
+     const level=primary.policyLevels[col].level,otherCol=secondaryLevels.get(level);
+     if(otherCol===undefined||!other.cells[otherCol])continue;
+     const a=UTIL.readMetric(numericOrDash(row.cells[col].str));
+     const b=UTIL.readMetric(numericOrDash(other.cells[otherCol].str));
+     matched++;
+     if(a!==b){mismatches++;warnings.push(`${fundName}: Page 2 secondary MER cross-check differs for ${row.seriesName} ${level}; Page 1 remains the primary source.`);}
+    }
+   }
+   return {status:mismatches?'mismatch':matched?'matched':'unavailable',page:secondary.page.page,matched,mismatches};
+  };
+  const findUOSRows=(cover,seriesNames,guaranteeCount)=>{
+   const items=cover.items||[];
+   const headers=items.filter(i=>/^UOS$/i.test(textOf(i))&&i.y>635&&i.y<675).sort((a,b)=>cx(a)-cx(b));
+   if(headers.length!==guaranteeCount)return {rows:new Map(),warning:`expected ${guaranteeCount} UOS columns but found ${headers.length}`};
+   const labels=items.filter(i=>i.x<210&&i.y>590&&i.y<650&&/\bseries\b/i.test(textOf(i)));
+   const rows=new Map();let warning=null;
+   for(const seriesName of seriesNames){
+    const matching=labels.filter(item=>parseSeriesName(textOf(item))===seriesName);
+    if(matching.length!==1){warning=`${seriesName}: expected one matching Quick Facts series row, found ${matching.length}`;continue;}
+    const label=matching[0],sameLine=items.filter(item=>Math.abs(item.y-label.y)<2.5&&numericOrDash(item.str)!==null);
+    const values=headers.map(header=>{
+     const matches=sameLine.filter(item=>Math.abs(cx(item)-cx(header))<19);
+     if(matches.length!==1)return null;
+     const raw=clean(matches[0].str).replace(/,/g,'');
+     return /^\d+$/.test(raw)?{value:Number(raw),item:matches[0]}:null;
+    });
+    if(values.some(value=>!value)){warning=`${seriesName}: UOS values could not be aligned to every guarantee-policy column`;continue;}
+    rows.set(seriesName,values);
+   }
+   return {rows,warning};
+  };
+
+  const coverPages=index.filter(isCover);
+  if(!coverPages.length)throw Error('Canada Life: no supported Segregated Funds Fund Facts cover page found.');
+  for(let i=0;i<coverPages.length;i++){
+   const cover=coverPages[i],next=coverPages[i+1],endPage=next?next.page-1:index[index.length-1].page;
+   const name=fundTitle(cover),reportDate=parseDate(cover);
+   if(!name||!reportDate){warnings.push(`PDF page ${cover.page}: fund title or Fund Facts as-of date could not be validated.`);continue;}
+   const sectionPages=index.filter(page=>page.page>=cover.page&&page.page<=endPage);
+   const table=findCoverMERTable(cover);
+   const secondaryTable=findOngoingExpensesMERTable(sectionPages);
+   const fund={name,startPage:cover.page,endPage,tablePages:table?[table.page.page]:[],documentType:'Fund Facts',report_date:reportDate};
+   funds.push(fund);
+   if(!table){warnings.push(`${name}: Quick Facts page-1 MER matrix not found or its guarantee-policy headings were not validated.`);continue;}
+   fund.secondaryMERValidation=crossCheckPage2(table,secondaryTable,name);
+   const seriesNames=table.rows.map(row=>row.seriesName);
+   if(new Set(seriesNames).size!==seriesNames.length)warnings.push(`${name}: duplicate series labels detected in the MER matrix.`);
+   const uos=findUOSRows(cover,seriesNames,table.policyLevels.length);
+   if(uos.warning)warnings.push(`${name}: ${uos.warning}. Affected MER estimate status left unverified.`);
+   const notePage=sectionPages.find(isEstimateNote)||null;
+   const noteItem=notePage?findNoteItem(notePage):null;
+   const hasEstimateNote=!!notePage;
+   if(!hasEstimateNote)warnings.push(`${name}: zero-UOS MER estimate footnote not found; no MER values will be marked estimated.`);
+   const ptr=parsePTR(cover);
+   if(ptr.warning)warnings.push(`${name}: ${ptr.warning}; PTR left blank.`);
+   for(const seriesRow of table.rows){
+    if(seriesRow.warning){warnings.push(`${name} / ${seriesRow.seriesName}: ${seriesRow.warning}.`);continue;}
+    const uosValues=uos.rows.get(seriesRow.seriesName)||null;
+    for(let col=0;col<table.policyLevels.length;col++){
+     const policy=table.policyLevels[col],cell=seriesRow.cells[col];
+     const raw=numericOrDash(cell.str),MER=UTIL.readMetric(raw);
+     const uosCell=uosValues?.[col]||null;
+     const estimated=!!(uosCell&&uosCell.value===0&&hasEstimateNote);
+     if(uosCell?.value===0&&!hasEstimateNote)warnings.push(`${name} / ${seriesRow.seriesName} ${policy.level}: zero UOS found but estimate footnote is absent; MER estimate status not asserted.`);
+     const className=`${seriesRow.seriesName} ${policy.level}`;
+     const merEvidence={page:cover.page,box:UTIL.box(cell),sourceText:textOf(cell),source:textOf(cell),isMissing:MER===null,
+      kind:'canada-life-fund-facts-management-expense-ratio',headingText:'Management Expense Ratio (MER)',...(estimated?{estimated:true}:{})};
+     const row={row_id:UTIL.key(name,className,reportDate),fund_name:name,class_name:className,
+      report_date:reportDate,year:Number(reportDate.slice(0,4)),MER,TER:null,PTR:ptr.value,
+      confidence:'validated-series-by-guarantee-matrix',verified:false,document_type:'Fund Facts',
+      metricStatus:estimated?{MER:'estimated'}:{},
+      ...(estimated?{metricStatusEvidence:{MER:{reason:'Corresponding Units Outstanding is zero and the source footnote states that MER is an estimate.',
+       uos:{page:cover.page,box:UTIL.box(uosCell.item),sourceText:textOf(uosCell.item),guaranteeLevel:policy.level},
+       footnote:{page:notePage.page,box:noteItem?UTIL.box(noteItem):null,sourceText:noteItem?textOf(noteItem):'If there are zero units outstanding, the MER shown is an estimate.'}}}}:{}),
+      evidence:{MER:merEvidence,TER:null,PTR:ptr.evidence},source_page:cover.page,ptr_scope:'fund-level',
+      series_name:seriesRow.seriesName,guarantee_policy:policy.level};
+     results.push(row);
+    }
+   }
+   if(!uos.rows.size)warnings.push(`${name}: no validated UOS series rows; MER estimate flags were not applied.`);
+  }
+  if(!funds.length)throw Error('Canada Life: Fund Facts documents were detected, but no fund title/date could be validated.');
+  if(!results.length)throw Error('Canada Life: no series/guarantee MER records could be extracted from a validated Quick Facts matrix.');
+  const dates=funds.map(f=>f.report_date).sort();
+  const report_date=dates[dates.length-1];
+  return {issuer:'The Canada Life Assurance Company',document_type:'Fund Facts',report_date,
+   year:Number(report_date.slice(0,4)),funds,results,warnings};
  }
 });
 
