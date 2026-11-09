@@ -2,6 +2,9 @@
 (function(global){
 'use strict';
 const enc=new TextEncoder();
+// Keep the established TER spreadsheet column name for compatibility. Its meaning
+// is TOTAL Expense Ratio; legacy/ambiguous non-null values must never be exported.
+const totalTER=(r,doc)=>doc.terDefinition==='total-expense-ratio-v1'?(r.TER??null):null;
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
 const fullName=r=>{
  const fund=String(r.fund_name||'').trim(),cls=String(r.class_name||'').trim();
@@ -9,13 +12,13 @@ const fullName=r=>{
  return cls.toLowerCase().startsWith(fund.toLowerCase()+' ')?cls:fund+' '+cls;
 };
 function cols(docs){
- const main=[['Fund Name','Class / Fund','Year','Reporting Date','MER','TER','PTR','MER Source','MER Page','TER Page','PTR Page','Verification','Filename']];
+ const main=[['Fund Name','Class / Fund','Year','Reporting Date','MER','TER','PTR','MER Source','MER Page','TER Page','PTR Page','Verification','Filename','MER Status']];
  const lipper=[['Lipper ID','Class / Fund','MER','TER','PTR','Reporting Date (MM/DD/YYYY)']];
  for(const doc of docs){
   for(const r of doc.results||[]){
    const ev=r.evidence||{};
-   main.push([r.fund_name||'',fullName(r),r.year??null,r.report_date||null,r.MER??null,r.TER??null,r.PTR??null,ev.MER?.source||'',ev.MER?.page??null,ev.TER?.page??null,ev.PTR?.page??null,doc.verified?'Verified':'Unverified',doc.filename||'']);
-   lipper.push([null,fullName(r),r.MER??null,r.TER??null,r.PTR??null,r.report_date||null]);
+   main.push([r.fund_name||'',fullName(r),r.year??null,r.report_date||null,r.MER??null,totalTER(r,doc),r.PTR??null,ev.MER?.source||'',ev.MER?.page??null,ev.TER?.page??null,ev.PTR?.page??null,doc.verified?'Verified':'Unverified',doc.filename||'',r.metricStatus?.MER==='estimated'?'Estimated':r.metricStatus?.MER==='manual'?'Manual':'']);
+   lipper.push([null,fullName(r),r.MER??null,totalTER(r,doc),r.PTR??null,r.report_date||null]);
   }
  }
  return [main,lipper];
@@ -102,13 +105,22 @@ function zip(entries){
  return new Blob(chunks,{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
 }
 function excel(docs){return zip(files(docs));}
+function filteredCsv(records){
+ const output=[['Lipper ID','Fund Name','MER','TER','PTR','MRFP DATE']];
+ for(const item of records||[]){
+  const doc=item.doc||{},r=item.row||{};
+  output.push([item.lipperId||'',fullName(r),r.MER??null,totalTER(r,doc),r.PTR??null,r.report_date||doc.report_date||'']);
+ }
+ const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+ return new Blob(['\ufeff'+output.map(row=>row.map(q).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
+}
 function csv(docs){
  const sheets=cols(docs);
- const output=[['Fund Name','Class / Fund','Year','Reporting Date','MER','TER','PTR','Verification','Filename']];
+ const output=[['Fund Name','Class / Fund','Year','Reporting Date','MER','TER','PTR','Verification','Filename','MER Status']];
  for(const doc of docs)for(const r of doc.results||[])
-  output.push([r.fund_name,fullName(r),r.year,r.report_date,r.MER,r.TER,r.PTR,doc.verified?'Verified':'Unverified',doc.filename]);
+  output.push([r.fund_name,fullName(r),r.year,r.report_date,r.MER,totalTER(r,doc),r.PTR,doc.verified?'Verified':'Unverified',doc.filename,r.metricStatus?.MER==='estimated'?'Estimated':r.metricStatus?.MER==='manual'?'Manual':'']);
  const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
  return new Blob(['\ufeff'+output.map(r=>r.map(q).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
 }
-global.MRFP_EXPORT={excel,csv,fullName};
+global.MRFP_EXPORT={excel,csv,filteredCsv,fullName};
 })(globalThis);
