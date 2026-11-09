@@ -41,8 +41,7 @@ function placeholder(i,width,height){
  outer.style.width=width+'px';outer.style.height=height+'px';
  const label=document.createElement('span');label.className='sheet-number';label.textContent='Page '+i;
  const layer=document.createElement('div');layer.className='evidence-layer';
- const focusLayer=document.createElement('div');focusLayer.className='evidence-focus-layer';
- outer.append(label,layer,focusLayer);
+ outer.append(label,layer);
  return outer;
 }
 function updateCounters(){
@@ -51,11 +50,23 @@ function updateCounters(){
  $('evidenceNext').disabled=!state.pdf||state.current>=state.pdf.numPages;
  $('evidenceZoom').textContent=Math.round(state.scale*100)+'%';
 }
+function syncCurrentPage(){
+ if(!state.pdf)return;
+ const area=$('evidenceScroll'),children=[...$('evidencePages').children];
+ if(!children.length)return;
+ const reference=area.getBoundingClientRect().top+12;
+ let active=children.find(node=>{const r=node.getBoundingClientRect();return r.top<=reference&&r.bottom>reference;});
+ if(!active){
+  const candidates=children.map(node=>({node,rect:node.getBoundingClientRect()})).filter(x=>x.rect.bottom>reference);
+  active=(candidates.sort((a,b)=>Math.abs(a.rect.top-reference)-Math.abs(b.rect.top-reference))[0]||{}).node;
+ }
+ const page=Number(active?.dataset.page);
+ if(Number.isInteger(page)&&page>=1&&page<=state.pdf.numPages&&page!==state.current){state.current=page;updateCounters();}
+}
 function getShell(n){return $('evidencePages').querySelector(`[data-page="${n}"]`);}
 function showOverlay(n){
  const shell=getShell(n);if(!shell)return;
  const layer=shell.querySelector('.evidence-layer');layer.replaceChildren();
- const focusLayer=shell.querySelector('.evidence-focus-layer');focusLayer?.replaceChildren();
  const cached=state.cache.get(n);if(!cached?.viewport)return;
  for(const e of state.overlay.filter(x=>x.page===n)){
   const rect=cached.viewport.convertToViewportRectangle([e.box.x,e.box.y,e.box.x+e.box.w,e.box.y+e.box.h]);
@@ -65,15 +76,12 @@ function showOverlay(n){
   const isFocused=!!(state.focusKey&&e.rowKey===state.focusKey);
   if(isFocused)mark.classList.add('is-focused');
   mark.style.left=x+'px';mark.style.top=y+'px';mark.style.width=width+'px';mark.style.height=height+'px';
-  mark.title=`${e.className||'Class/Series'} · ${e.metric} — original PDF: ${e.isMissing?'missing ('+(e.sourceText||'—')+')':(e.sourceText??e.value)}`;
-  if(isFocused&&focusLayer){
-   // Keep the orange box visible on the normal overlay layer while the second
-   // screen-blended layer recolors only the PDF glyphs inside that same cell.
-   const box=document.createElement('div');box.className='pdf-evidence-focus-box';
-   box.style.left=x+'px';box.style.top=y+'px';box.style.width=width+'px';box.style.height=height+'px';
-   layer.appendChild(box);focusLayer.appendChild(mark);
-  }else layer.appendChild(mark);
+  mark.title=`${e.className||'Class/Series'} · ${e.metric}${e.estimated?' (estimated)':''} — original PDF: ${e.isMissing?'missing ('+(e.sourceText||'—')+')':(e.sourceText??e.value)}`;
+  // Outline-only overlay: keep the original PDF glyphs fully visible and black.
+  // Yellow outlines show all evidence; orange outlines identify the focused row.
+  layer.appendChild(mark);
  }
+
 }
 async function render(n){
  const token=state.token,pdf=state.pdf;if(!pdf||!Number.isInteger(n)||n<1||n>pdf.numPages)return;
@@ -119,10 +127,13 @@ function renderVisible(){
 async function jump(n,{highlight=false}={}){
  if(!state.pdf)return;
  const page=clamp(Math.round(Number(n)||1),1,state.pdf.numPages);
- state.current=page;updateCounters();
  const shell=getShell(page);if(!shell)return;
- shell.scrollIntoView({block:'start',behavior:'instant'});
- await render(page);if(highlight){
+ const area=$('evidenceScroll'),areaRect=area.getBoundingClientRect(),shellRect=shell.getBoundingClientRect();
+ // Scroll the PDF pane itself (not an outer page/body ancestor) so the visible
+ // sheet and the page counter always refer to the same physical PDF page.
+ area.scrollTop=Math.max(0,area.scrollTop+shellRect.top-areaRect.top-8);
+ state.current=page;updateCounters();
+ await render(page);syncCurrentPage();if(highlight){
   showOverlay(page);
   // Scroll to the actual displayed mark rather than adding a PDF-coordinate
   // offset to a scroll position that may have changed during lazy rendering.
@@ -142,7 +153,6 @@ function changeZoom(factor){
   const w=Number(shell.dataset.baseWidth)||612,h=Number(shell.dataset.baseHeight)||792;
   shell.style.width=w*state.scale+'px';shell.style.height=h*state.scale+'px';
   shell.querySelector('.evidence-layer').replaceChildren();
-  shell.querySelector('.evidence-focus-layer')?.replaceChildren();
  }
  updateCounters();jump(page).then(renderVisible);
 }
@@ -258,10 +268,7 @@ async function open(blob,doc){
   state.observer=new IntersectionObserver(entries=>{
    if(token!==state.token)return;
    for(const e of entries){const n=Number(e.target.dataset.page);if(e.isIntersecting)state.visible.add(n);else state.visible.delete(n);}
-   const top=area.getBoundingClientRect().top;
-   const near=[...container.children].filter(node=>node.getBoundingClientRect().bottom>top+2).sort((a,b)=>Math.abs(a.getBoundingClientRect().top-top)-Math.abs(b.getBoundingClientRect().top-top))[0];
-   if(near){state.current=Number(near.dataset.page);updateCounters();}
-   renderVisible();
+   syncCurrentPage();renderVisible();
   },{root:area,rootMargin:'600px 0px',threshold:0});
   for(const el of container.children)state.observer.observe(el);
   repaint();
@@ -294,8 +301,9 @@ async function focusRow(row){
  const record=doc.evidenceMap?.rows?.[key]||{pages:[],metrics:{}};
  const evidence=Object.entries(record.metrics||{}).filter(([metric,v])=>v&&v.box&&Number.isInteger(v.page)).map(([metric,v])=>({metric,...v}));
  const pageList=[...new Set([...evidence.map(e=>e.page),...(record.pages||[])])].sort((a,b)=>a-b);
+ const primaryPage=Number.isInteger(record.metrics?.MER?.page)?record.metrics.MER.page:pageList[0];
  state.focusKey=key;repaint();
- if(pageList.length)await jump(pageList[0],{highlight:true});else await jump(state.current);
+ if(primaryPage)await jump(primaryPage,{highlight:true});else await jump(state.current);
  if(token!==state.token||doc!==state.doc)return;
  const correction=!!row.originalValues||['MER','TER','PTR'].some(k=>row.evidence?.[k]?.method==='manual');
  const ratioCount=3;
@@ -359,6 +367,7 @@ function focusFund(fund,doc){
 function bind(){
  $('evidenceScroll').addEventListener('wheel',()=>{state.userNavigated=true;},{passive:true});
  $('evidenceScroll').addEventListener('touchstart',()=>{state.userNavigated=true;},{passive:true});
+ $('evidenceScroll').addEventListener('scroll',syncCurrentPage,{passive:true});
  $('evidencePrev').onclick=()=>{state.userNavigated=true;jump(state.current-1);};
  $('evidenceNext').onclick=()=>{state.userNavigated=true;jump(state.current+1);};
  $('evidenceZoomIn').onclick=()=>{state.userNavigated=true;changeZoom(1.2);};
