@@ -13,5 +13,15 @@
     "key": "canada_life",
     "file": "js/fmc/canada_life.js",
     "name": "Canada Life Segregated Funds Fund Facts"
+  },
+  {
+    "key": "bmo",
+    "file": "js/fmc/bmo.js",
+    "name": "BMO Life Assurance Company — Guaranteed Investment Funds"
+  },
+  {
+    "key": "ivari",
+    "file": "js/fmc/ivari.js",
+    "name": "ivari — AIC Segregated Funds"
   }
 ]
