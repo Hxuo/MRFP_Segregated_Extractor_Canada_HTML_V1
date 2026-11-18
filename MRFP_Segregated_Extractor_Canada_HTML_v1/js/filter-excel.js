@@ -9,7 +9,7 @@ const nameKey=value=>String(value??'').normalize('NFKC').toLowerCase().replace(/
 const headerKind=value=>{
  const key=nameKey(value);
  if(['assetid','lipperid'].includes(key))return 'asset';
- if(key==='fundname')return 'fund';
+ if(['classfund','fullfundname','fundname','name'].includes(key))return 'fund';
  return null;
 };
 function assert(condition,message){if(!condition)throw Error(message);}
@@ -126,29 +126,44 @@ function parseWorksheet(doc,strings,formats){
  }
  return rows;
 }
+const FUND_HEADER_PRIORITY={fullfundname:0,classfund:1,fundname:2,name:3};
 function inspectSheet(sheet){
  const rows=sheet.rows||[];
  let best=null;
  for(let i=0;i<Math.min(rows.length,75);i++){
-  const columns=rows[i].cells||[];let asset=-1,fund=-1;
-  columns.forEach((value,idx)=>{
-   const kind=headerKind(value);
-   if(kind==='asset'&&asset<0)asset=idx;
-   if(kind==='fund'&&fund<0)fund=idx;
+  const cells=rows[i].cells||[],fundColumns=[],assetColumns=[];
+  cells.forEach((value,idx)=>{
+   const key=nameKey(value),kind=headerKind(value);
+   if(kind==='fund')fundColumns.push({index:idx,header:String(value).trim(),priority:FUND_HEADER_PRIORITY[key]});
+   if(kind==='asset')assetColumns.push({index:idx,header:String(value).trim()});
   });
-  if(fund>=0){best={headerRow:rows[i].rowNumber,headerIndex:i,assetColumn:asset,fundColumn:fund};if(asset>=0)break;}
+  if(!fundColumns.length)continue;
+  fundColumns.sort((a,b)=>a.priority-b.priority||a.index-b.index);
+  // A fund-name column alone is sufficient. An ID column is optional metadata.
+  best={headerRow:rows[i].rowNumber,headerIndex:i,fundColumn:fundColumns[0].index,
+   fundHeader:fundColumns[0].header,assetColumn:assetColumns.length?assetColumns[0].index:-1,
+   assetHeader:assetColumns.length?assetColumns[0].header:null,assetColumns,fundColumns};
+  break;
  }
- if(!best||best.assetColumn<0||best.fundColumn<0)return {valid:false,validRows:0,rowsRead:0,entries:[],skipped:0,error:'The worksheet must have both Asset ID and Fund Name columns.'};
- const entries=[];let skipped=0;
+ if(!best)return {valid:false,validRows:0,rowsRead:0,entries:[],skipped:0,
+  assetColumn:-1,fundColumn:-1,error:'Missing fund-name column. Use Class/Fund, Full Fund Name, Fund Name, or Name.'};
+ const entries=[];let skipped=0,idConflictRows=0;
  for(const row of rows.slice(best.headerIndex+1)){
   const name=String(row.cells[best.fundColumn]??'').trim().replace(/\s+/g,' ');
-  const asset=String(row.cells[best.assetColumn]??'').trim();
-  if(!name||nameKey(name)==='fundname'){skipped++;continue;}
-  entries.push({lipperId:asset,name,excelRow:row.rowNumber});
+  if(!name||headerKind(name)==='fund'){skipped++;continue;}
+  const ids=best.assetColumns.map(c=>String(row.cells[c.index]??'').trim()).filter(Boolean);
+  // Asset ID and Lipper ID mean the same thing. Never guess between different
+  // non-empty values: preserve a blank exported ID and report the conflict.
+  const uniqueIds=[...new Set(ids)];
+  if(uniqueIds.length>1)idConflictRows++;
+  entries.push({lipperId:uniqueIds.length===1?uniqueIds[0]:'',name,excelRow:row.rowNumber});
  }
  return {valid:true,headerRow:best.headerRow,assetColumn:best.assetColumn,fundColumn:best.fundColumn,
+  assetHeader:best.assetHeader,fundHeader:best.fundHeader,idConflictRows,
+  fundHeaderAlternatives:best.fundColumns.slice(1).map(x=>x.header),
   rowsRead:Math.max(0,rows.length-best.headerIndex-1),validRows:entries.length,skipped,entries};
 }
+
 async function readOpenXmlWorkbook(file){
  assert(file&&/\.(xlsx|xlsm)$/i.test(file.name||''),'Choose an .xlsx or .xlsm Excel workbook.');
  assert(file.size<=MAX_FILE_BYTES,'Excel file exceeds 25 MB');
