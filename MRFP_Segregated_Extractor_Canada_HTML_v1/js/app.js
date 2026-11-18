@@ -21,10 +21,10 @@ function showPage(name){
 function pick(files){
  if(st.processing)return;
  const wasQueuePreview=!!st.queuePreviewFile;st.queuePreviewFile=null;
- const pdfs=[...files].filter(f=>f.type==='application/pdf'||/\.pdf$/i.test(f.name)).slice(0,5);
+ const pdfs=[...files].filter(f=>f.type==='application/pdf'||/\.pdf$/i.test(f.name)).slice(0,10);
  st.queue=pdfs;st.failed=0;
  if(wasQueuePreview&&!st.active){VIEW.reset();$('pdfUnavailable').classList.remove('hidden');$('pdfUnavailable').textContent='No PDF selected — choose or open a saved document to preview.';renderGroups();}$('pdf').value='';$('filename').textContent=pdfs.length?pdfs.map(f=>f.name).join(', '):'Choose or drop PDFs to begin';
- $('batchCount').textContent=pdfs.length+' / 5 files selected';renderBatch();setProgress(0);renderStats();
+ $('batchCount').textContent=pdfs.length+' / 10 files selected';renderBatch();setProgress(0);renderStats();
 }
 function renderBatch(){
  const el=$('batchList');el.replaceChildren();if(!st.queue.length){el.innerHTML='<span class="muted">No files queued.</span>';return;}
@@ -166,7 +166,7 @@ function renderFilteredGroups(){
  const conflictText=st.neededFilter.idConflicts?` · ${st.neededFilter.idConflicts} conflicting Lipper ID mapping(s) left blank`:'';
  const filterSource=st.neededFilter.source?.type==='excel'?`Uploaded: ${st.neededFilter.source.fileName||'workbook'} · ${st.neededFilter.source.sheetName||'worksheet'}`:'Manual pasted list';
  $('neededFilterSummary').innerHTML=`<div class="seg-filter-counts"><b>Matched entries: ${st.neededFilter.matchedEntries||0}</b><span>Displayed rows: ${records.length}</span><span>Unmatched entries: ${unmatched.length}</span><span>Recent Documents searched: ${st.neededFilter.docsSearched||0}</span>${conflictText?`<span class="seg-filter-warning">${esc(conflictText)}</span>`:''}</div><div class="seg-filter-source">${esc(filterSource)}</div>${unmatchedList}`;
- $('docNotes').textContent=`Data Needed Only · ${filterSource} · searched all successfully extracted fund/class records in ${st.neededFilter.docsSearched||0} PDF(s) currently listed in Recent Documents. Matching uses fund name and optional exact class/series. TER remains Total Expense Ratio only.`;
+ $('docNotes').textContent=`Data Needed Only · ${filterSource} · searched all successfully extracted fund/class records in ${st.neededFilter.docsSearched||0} PDF(s) currently listed in Recent Documents. Matching uses fund name and optional class/series; Class A also includes same-series A Prestige. TER remains Total Expense Ratio only.`;
  if(!records.length){root.innerHTML='<div class="empty">No matching extracted funds or classes in the PDFs currently listed in Recent Documents.</div>';return;}
 
  // One flat, cross-document table keeps every matching row together. The source
@@ -219,35 +219,38 @@ function applyNeededFilter(){
  st.neededFilter.input=text;st.neededFilter.entries=entries;st.neededFilter.applied=true;st.neededFilter.source={type:'paste'};recomputeNeededFilter();
  $('neededFilterDialog').close();renderGroups();notify(`Data Needed Only applied: ${st.neededFilter.matchedEntries} matched entries, ${st.neededFilter.matches.length} displayed rows, ${st.neededFilter.unmatchedEntries.length} unmatched.`);
 }
-function uploadColumnPresence(sheet){
- const result={asset:false,fund:false};
- for(const row of (sheet?.rows||[]).slice(0,75)){
-  for(const value of row.cells||[]){
-   const kind=FILTER_EXCEL?.headerKind?.(value);
-   if(kind==='asset')result.asset=true;
-   if(kind==='fund')result.fund=true;
-  }
-  if(result.asset&&result.fund)break;
- }
- return result;
+function spreadsheetColumn(index){
+ if(!Number.isInteger(index)||index<0)return '—';
+ let text='',n=index+1;
+ while(n>0){n--;text=String.fromCharCode(65+(n%26))+text;n=Math.floor(n/26);}
+ return text;
 }
+
 function renderFilteredUploadPreview(){
  const upload=st.filteredUpload;if(!upload)return;
  const sheet=upload.workbook.sheets[upload.selectedSheetIndex],analysis=sheet?.analysis||{valid:false,rowsRead:0,validRows:0,skipped:0,entries:[]};
- const found=uploadColumnPresence(sheet);
+ const assetFound=analysis.assetColumn>=0,fundFound=analysis.fundColumn>=0;
  $('filteredUploadFilename').textContent=`${upload.workbook.name} · ${sheet?.name||'No worksheet selected'}`;
  $('filteredUploadRowsRead').textContent=String(analysis.rowsRead||0);
  $('filteredUploadValidRows').textContent=String(analysis.validRows||0);
  $('filteredUploadSkippedRows').textContent=String(analysis.skipped||0);
- $('filteredUploadAssetStatus').textContent=`Asset ID · ${found.asset?'Found':'Not found'}`;
- $('filteredUploadFundStatus').textContent=`Fund Name · ${found.fund?'Found':'Not found'}`;
- $('filteredUploadAssetStatus').classList.toggle('is-found',found.asset);
- $('filteredUploadFundStatus').classList.toggle('is-found',found.fund);
+ $('filteredUploadAssetStatus').textContent=assetFound?`Asset ID / Lipper ID · ${analysis.assetHeader} (${spreadsheetColumn(analysis.assetColumn)})`:'Asset ID / Lipper ID · Optional (not found)';
+ $('filteredUploadFundStatus').textContent=fundFound?`Fund Name · ${analysis.fundHeader} (${spreadsheetColumn(analysis.fundColumn)})`:'Fund Name · Not found';
+ $('filteredUploadAssetStatus').classList.toggle('is-found',assetFound);
+ $('filteredUploadFundStatus').classList.toggle('is-found',fundFound);
  const error=$('filteredUploadError');
- if(!analysis.valid)error.textContent='The selected worksheet must contain both Asset ID (or Lipper ID) and Fund Name columns. Choose another worksheet or upload a corrected file.';
- else if(!analysis.validRows)error.textContent='Both required columns were found, but no usable Fund Name entries were detected.';
+ if(!analysis.valid)error.textContent=analysis.error||'No recognized fund-name column. Use Class/Fund, Full Fund Name, Fund Name, or Name.';
+ else if(!analysis.validRows)error.textContent='A fund-name column was found, but no usable entries were detected.';
  else error.textContent='';
  error.classList.toggle('hidden',!error.textContent);
+ const info=$('filteredUploadInfo');
+ if(info){
+  const notes=[];
+  if(analysis.valid&&!assetFound)notes.push('No Asset ID/Lipper ID column: IDs will be blank in Export Filtered CSV.');
+  if(analysis.idConflictRows)notes.push(`${analysis.idConflictRows} row(s) contain conflicting Asset ID/Lipper ID values. Their IDs will be blank.`);
+  if(analysis.fundHeaderAlternatives?.length)notes.push(`Using ${analysis.fundHeader} for matching; other recognized name headers ignored: ${analysis.fundHeaderAlternatives.join(', ')}.`);
+  info.textContent=notes.join(' ');info.classList.toggle('hidden',!notes.length);
+ }
  const preview=$('filteredUploadPreview');preview.replaceChildren();
  const entries=analysis.entries||[],pageSize=10,totalPages=Math.max(1,Math.ceil(entries.length/pageSize));
  upload.page=Math.min(Math.max(1,Number(upload.page)||1),totalPages);
@@ -291,7 +294,7 @@ async function readFilteredListFile(file){
   const select=$('filteredUploadSheet');select.replaceChildren();
   sheets.forEach((sheet,index)=>{
    const option=document.createElement('option');option.value=String(index);
-   option.textContent=`${sheet.name}${sheet.analysis?.valid?` · ${sheet.analysis.validRows} valid entries`:' · required columns not found'}`;
+   option.textContent=`${sheet.name}${sheet.analysis?.valid?` · ${sheet.analysis.validRows} valid entries`:' · fund-name column not found'}`;
    select.appendChild(option);
   });
   select.value=String(selectedSheetIndex);
@@ -305,7 +308,7 @@ async function readFilteredListFile(file){
 function applyUploadedFilteredList(){
  const upload=st.filteredUpload;if(!upload)return;
  const sheet=upload.workbook.sheets[upload.selectedSheetIndex],analysis=sheet?.analysis;
- if(!analysis?.valid||!analysis.entries?.length){notify('Choose a worksheet with both required columns and at least one valid Fund Name.');return;}
+ if(!analysis?.valid||!analysis.entries?.length){notify('Choose a worksheet with a recognized fund-name column and at least one valid entry.');return;}
  const entries=analysis.entries.map((entry,index)=>({
   id:String(entry.lipperId??'').trim(),
   name:String(entry.name??'').trim(),
